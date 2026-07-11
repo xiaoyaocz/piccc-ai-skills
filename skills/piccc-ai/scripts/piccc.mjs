@@ -1,0 +1,282 @@
+#!/usr/bin/env node
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { extname, join } from 'node:path'
+
+const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
+const MODEL_PATHS = {
+  image: '/v1/images/models',
+  video: '/v1/videos/models',
+  audio: '/v1/audio/models',
+}
+const TASK_PATHS = {
+  image: '/v1/images/tasks',
+  video: '/v1/videos/tasks',
+  audio: '/v1/audio/tasks',
+}
+const HELP = `Piccc AI media task CLI
+
+Usage:
+  piccc.mjs models image|video|audio
+  piccc.mjs voices --model ID [--search TEXT]
+  piccc.mjs generate image|video|audio --model ID (--prompt TEXT | --prompt-file FILE) [options]
+  piccc.mjs task get TASK_ID
+  piccc.mjs task wait TASK_ID [--output-dir DIR] [--timeout MS] [--interval MS]
+  piccc.mjs tasks [--type TYPE] [--status STATUS] [--page N] [--page-size N]
+
+Generate options:
+  --wait                 Wait for a terminal task status
+  --output-dir DIR       Download completed outputs (requires --wait)
+  --external-id ID       Attach your own task identifier
+
+Run model discovery before generation. See references/api.md for media-specific options.
+Authentication: set PICCC_API_KEY in the environment.
+`
+const { command, positional, options } = parseArgs(process.argv.slice(2))
+
+try {
+  if (['', 'help', '--help', '-h'].includes(command) || flag('help')) process.stdout.write(HELP)
+  else if (command === 'models') output(await modelsCommand())
+  else if (command === 'voices') output(await voices())
+  else if (command === 'generate') output(await generateCommand())
+  else if (command === 'task') output(await taskCommand())
+  else if (command === 'tasks') output(await listTasks())
+  else usage()
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error))
+  process.exitCode = 1
+}
+
+async function models(type) {
+  return request(MODEL_PATHS[type])
+}
+
+async function modelsCommand() {
+  validateInvocation(1, [])
+  return models(requiredMediaType(positional[0]))
+}
+
+async function voices() {
+  validateInvocation(0, ['model', 'search'])
+  const modelId = required('model')
+  const response = await models('audio')
+  const model = (response.data || []).find((item) => item.id === modelId)
+  if (!model) throw new Error(`Audio model not found: ${modelId}`)
+  const search = String(option('search') || '').toLowerCase()
+  const items = (model.voice_presets || []).filter((voice) => !search || JSON.stringify(voice).toLowerCase().includes(search))
+  return { object: 'list', model: modelId, data: items }
+}
+
+async function generateCommand() {
+  if (positional.length !== 1) usage()
+  const type = requiredMediaType(positional[0])
+  const shared = ['model', 'prompt', 'prompt-file', 'wait', 'output-dir', 'timeout', 'interval', 'external-id']
+  const media = {
+    image: ['aspect-ratio', 'resolution', 'quality', 'n', 'web-search'],
+    video: ['route-mode', 'reference-mode', 'resolution', 'aspect-ratio', 'duration', 'audio', 'web-search'],
+    audio: ['format', 'sample-rate', 'speech-rate', 'loudness-rate', 'pitch-rate', 'reference-mode', 'voice-id', 'audio-reference', 'image-reference'],
+  }
+  validateOptions([...shared, ...media[type]])
+  if (option('prompt') && option('prompt-file')) throw new Error('Use either --prompt or --prompt-file, not both')
+  if (option('output-dir') && !flag('wait')) throw new Error('--output-dir requires --wait')
+  if ((option('timeout') || option('interval')) && !flag('wait')) throw new Error('--timeout and --interval require --wait')
+  return generate(type)
+}
+
+async function generate(type) {
+  const body = type === 'image'
+    ? await imageBody()
+    : type === 'video'
+      ? await videoBody()
+      : await audioBody()
+  const created = await request(TASK_PATHS[type], { method: 'POST', body })
+  if (!flag('wait')) {
+    return type === 'audio'
+      ? { ...created, billing: { precharge_credits: 10, final_cost_available_after_completion: true } }
+      : created
+  }
+  const task = await waitForTask(created.task_id, type === 'video' ? 1200000 : 600000)
+  if (task.status !== 'completed') throw new Error(JSON.stringify(task, null, 2))
+  const downloads = option('output-dir') ? await downloadOutputs(task, option('output-dir')) : []
+  return { ...task, downloads }
+}
+
+async function imageBody() {
+  return compact({
+    model: required('model'),
+    prompt: await promptValue(),
+    aspect_ratio: option('aspect-ratio'),
+    resolution: option('resolution'),
+    quality: option('quality'),
+    n: integerOption('n'),
+    web_search: booleanOption('web-search'),
+    external_id: option('external-id'),
+  })
+}
+
+async function videoBody() {
+  return compact({
+    model: required('model'),
+    prompt: await promptValue(),
+    route_mode: option('route-mode'),
+    reference_mode: option('reference-mode'),
+    resolution: option('resolution'),
+    aspect_ratio: option('aspect-ratio'),
+    duration_seconds: integerOption('duration'),
+    audio: booleanOption('audio'),
+    web_search: booleanOption('web-search'),
+    external_id: option('external-id'),
+  })
+}
+
+async function audioBody() {
+  const audioReference = option('audio-reference')
+  const imageReference = option('image-reference')
+  return compact({
+    model: required('model'),
+    prompt: await promptValue(),
+    output_format: option('format'),
+    sample_rate: integerOption('sample-rate'),
+    speech_rate: numberOption('speech-rate'),
+    loudness_rate: numberOption('loudness-rate'),
+    pitch_rate: numberOption('pitch-rate'),
+    reference_mode: option('reference-mode') || 'text',
+    voice_id: option('voice-id'),
+    audio_references: audioReference ? [audioReference] : undefined,
+    image_references: imageReference ? [imageReference] : undefined,
+    external_id: option('external-id'),
+  })
+}
+
+async function taskCommand() {
+  const action = positional[0]
+  const taskId = positional[1]
+  if (!['get', 'wait'].includes(action) || !taskId || positional.length !== 2) usage()
+  validateOptions(action === 'wait' ? ['output-dir', 'timeout', 'interval'] : [])
+  if (action === 'get') return getTask(taskId)
+  const task = await waitForTask(taskId, 1200000)
+  const downloads = task.status === 'completed' && option('output-dir') ? await downloadOutputs(task, option('output-dir')) : []
+  return { ...task, downloads }
+}
+
+async function getTask(taskId) {
+  return request(`/v1/tasks/${encodeURIComponent(taskId)}`)
+}
+
+async function waitForTask(taskId, defaultTimeout) {
+  const timeout = integerOption('timeout') ?? defaultTimeout
+  const interval = integerOption('interval') ?? 3000
+  if (timeout <= 0) throw new Error('--timeout must be greater than 0')
+  if (interval <= 0) throw new Error('--interval must be greater than 0')
+  const deadline = Date.now() + timeout
+  while (true) {
+    const task = await getTask(taskId)
+    console.error(`[piccc-ai] ${task.status} ${task.progress ?? 0}%`)
+    if (TERMINAL.has(task.status)) return task
+    if (Date.now() >= deadline) return { ...task, timed_out: true }
+    await new Promise((resolve) => setTimeout(resolve, Math.max(500, interval)))
+  }
+}
+
+async function listTasks() {
+  validateInvocation(0, ['type', 'status', 'page', 'page-size'])
+  const query = new URLSearchParams()
+  for (const [optionName, queryName] of [['type', 'type'], ['status', 'status'], ['page', 'page'], ['page-size', 'page_size']]) {
+    if (option(optionName)) query.set(queryName, option(optionName))
+  }
+  return request(`/v1/tasks${query.size ? `?${query}` : ''}`)
+}
+
+async function downloadOutputs(task, directory) {
+  await mkdir(directory, { recursive: true })
+  const files = []
+  for (const [index, item] of (task.outputs || []).entries()) {
+    if (!item?.url) continue
+    const response = await fetch(item.url)
+    if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`)
+    const extension = extensionFor(item, response.headers.get('content-type'))
+    const path = join(directory, `${safeName(task.task_id)}-${index + 1}${extension}`)
+    await writeFile(path, Buffer.from(await response.arrayBuffer()))
+    files.push(path)
+  }
+  return files
+}
+
+function extensionFor(item, contentType = '') {
+  try {
+    const value = extname(new URL(item.url).pathname)
+    if (/^\.[a-z0-9]{1,8}$/i.test(value)) return value
+  } catch {}
+  const mime = String(item.mime_type || contentType).toLowerCase()
+  if (mime.includes('jpeg')) return '.jpg'
+  if (mime.includes('png')) return '.png'
+  if (mime.includes('webp')) return '.webp'
+  if (mime.includes('webm')) return '.webm'
+  if (mime.includes('video')) return '.mp4'
+  if (mime.includes('mpeg')) return mime.startsWith('audio') ? '.mp3' : '.mp4'
+  if (mime.includes('ogg')) return '.ogg'
+  if (mime.includes('flac')) return '.flac'
+  if (mime.includes('audio')) return '.wav'
+  return '.bin'
+}
+
+async function promptValue() {
+  if (option('prompt-file')) return (await readFile(option('prompt-file'), 'utf8')).trim()
+  return required('prompt')
+}
+
+async function request(path, init = {}) {
+  const key = process.env.PICCC_API_KEY?.trim()
+  if (!key) throw new Error('PICCC_API_KEY is required. Create one at https://picccai.cn/account?tab=apiKeys')
+  const base = (process.env.PICCC_API_BASE_URL || 'https://api.picccai.cn').replace(/\/+$/, '')
+  const response = await fetch(`${base}${path}`, {
+    method: init.method || 'GET',
+    headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
+    body: init.body ? JSON.stringify(init.body) : undefined,
+  })
+  const text = await response.text()
+  let data
+  try { data = text ? JSON.parse(text) : null } catch { data = text }
+  if (!response.ok) throw new Error(`Piccc API ${response.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`)
+  return data
+}
+
+function parseArgs(args) {
+  const command = args.shift() || ''
+  const positional = []
+  const options = {}
+  for (let index = 0; index < args.length; index++) {
+    const token = args[index]
+    if (!token.startsWith('--')) { positional.push(token); continue }
+    const key = token.slice(2)
+    const next = args[index + 1]
+    options[key] = next && !next.startsWith('--') ? args[++index] : true
+  }
+  return { command, positional, options }
+}
+
+function validateInvocation(positionalCount, allowedOptions) {
+  if (positional.length !== positionalCount) usage()
+  validateOptions(allowedOptions)
+}
+
+function validateOptions(allowed) {
+  const accepted = new Set(allowed)
+  for (const name of Object.keys(options)) {
+    if (!accepted.has(name)) throw new Error(`Unknown option: --${name}`)
+  }
+}
+
+function requiredMediaType(value) {
+  if (!MODEL_PATHS[value]) throw new Error('Media type must be image, video, or audio')
+  return value
+}
+function option(name) { return options[name] === true ? undefined : options[name] }
+function required(name) { const value = option(name); if (!value) throw new Error(`--${name} is required`); return value }
+function flag(name) { return options[name] === true || options[name] === 'true' }
+function integerOption(name) { const value = option(name); if (value == null) return undefined; const number = Number(value); if (!Number.isInteger(number)) throw new Error(`--${name} must be an integer`); return number }
+function numberOption(name) { const value = option(name); if (value == null) return undefined; const number = Number(value); if (!Number.isFinite(number)) throw new Error(`--${name} must be a number`); return number }
+function booleanOption(name) { return options[name] == null ? undefined : flag(name) }
+function compact(value) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== '')) }
+function safeName(value) { return String(value || 'piccc-output').replace(/[^a-z0-9_.-]+/gi, '_') }
+function output(value) { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
+function usage() { throw new Error('Usage: piccc.mjs models TYPE | voices --model ID | generate TYPE --model ID (--prompt TEXT | --prompt-file FILE) | task get|wait TASK_ID | tasks [filters]') }
