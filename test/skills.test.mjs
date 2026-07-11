@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 const root = resolve(import.meta.dirname, '..')
-const script = 'skills/piccc-ai/scripts/piccc.mjs'
+const script = 'scripts/piccc.mjs'
 let server
 let baseUrl
 const requests = []

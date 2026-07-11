@@ -8,6 +8,6 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check skills/piccc-ai/scripts/piccc.mjs && node --test"
+    "check": "node --check scripts/piccc.mjs && node --test"
   }
 }

@@ -58,7 +58,7 @@ $env:PICCC_API_KEY = "你的 API Key"
 
 ## 手动安装
 
-下载仓库后，将整个 [`skills/piccc-ai`](skills/piccc-ai) 目录复制到对应位置：
+下载仓库后，把根目录中的 `SKILL.md`、`agents`、`references` 和 `scripts` 复制到对应的 `piccc-ai` 目录：
 
 | Agent | 当前项目 | 全局使用 |
 | --- | --- | --- |
@@ -68,7 +68,7 @@ $env:PICCC_API_KEY = "你的 API Key"
 OpenClaw 也可以直接安装本地目录：
 
 ```bash
-openclaw skills install ./piccc-ai-skills/skills/piccc-ai
+openclaw skills install ./piccc-ai-skills
 ```
 
 脚本需要 Node.js 20 或更高版本，不需要安装 npm 依赖。
@@ -82,5 +82,5 @@ npm run check
 查看脚本支持的命令：
 
 ```bash
-node skills/piccc-ai/scripts/piccc.mjs --help
+node scripts/piccc.mjs --help
 ```
