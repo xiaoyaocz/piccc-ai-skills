@@ -29,6 +29,19 @@ test.before(async () => {
     if (request.url === '/v1/tasks/task-image') return response.end(JSON.stringify({ task_id: 'task-image', type: 'image', status: 'completed', progress: 100, outputs: [{ url: `${baseUrl}/files/image.png`, mime_type: 'image/png' }] }))
     if (request.url === '/v1/tasks/task-audio') return response.end(JSON.stringify({ task_id: 'task-audio', type: 'audio', status: 'completed', progress: 100, actual_cost: 7, outputs: [] }))
     if (request.url?.startsWith('/v1/tasks?')) return response.end(JSON.stringify({ items: [{ task_id: 'task-image', type: 'image', status: 'completed' }], page: 1, page_size: 20 }))
+    if (request.url === '/api/open-api/device/authorization') {
+      return response.end(JSON.stringify({
+        device_code: 'device-code',
+        user_code: 'ABCD-EFGH-JKLM',
+        verification_uri: `${baseUrl}/authorize/device`,
+        verification_uri_complete: `${baseUrl}/authorize/device?user_code=ABCD-EFGH-JKLM`,
+        expires_in: 30,
+        interval: 0.01,
+      }))
+    }
+    if (request.url === '/api/open-api/device/token') {
+      return response.end(JSON.stringify({ token_type: 'Bearer', api_key: 'pcc_live_authorized', key_id: 'ak-authorized', key_prefix: 'pcc_live_authoriz' }))
+    }
     if (request.url === '/files/image.png') {
       response.setHeader('Content-Type', 'image/png')
       return response.end(Buffer.from('fake-png'))
@@ -98,10 +111,19 @@ test('task commands query and filter existing tasks', async () => {
   assert.match(request.url, /status=completed/)
 })
 
-test('missing API key points to the Piccc AI account page', async () => {
-  const result = await runRaw(['models', 'image'], { PICCC_API_KEY: '', PICCC_API_BASE_URL: baseUrl })
-  assert.notEqual(result.code, 0)
-  assert.match(result.stderr, /https:\/\/picccai\.cn\/account\?tab=apiKeys/)
+test('missing credentials point to device authorization', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'piccc-skills-auth-missing-'))
+  try {
+    const result = await runRaw(['models', 'image'], {
+      PICCC_API_KEY: '',
+      PICCC_API_BASE_URL: baseUrl,
+      PICCC_CREDENTIALS_FILE: join(directory, 'missing.json'),
+    })
+    assert.notEqual(result.code, 0)
+    assert.match(result.stderr, /auth login/)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 test('help works without an API key', async () => {
@@ -123,6 +145,42 @@ test('output directory requires waiting for the task', async () => {
   const result = await runRaw(['generate', 'image', '--model', 'image-model', '--prompt', 'test', '--output-dir', 'output'])
   assert.notEqual(result.code, 0)
   assert.match(result.stderr, /--output-dir requires --wait/)
+})
+
+test('device authorization saves credentials and uses them automatically', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'piccc-skills-auth-'))
+  const credentialsFile = join(directory, 'credentials.json')
+  const env = {
+    PICCC_API_KEY: '',
+    PICCC_API_BASE_URL: baseUrl,
+    PICCC_AUTH_BASE_URL: baseUrl,
+    PICCC_CREDENTIALS_FILE: credentialsFile,
+  }
+  try {
+    const login = await runRaw(['auth', 'login', '--client-name', 'Codex test', '--timeout', '5000'], env)
+    assert.equal(login.code, 0)
+    assert.match(login.stderr, /authorize\/device\?user_code=ABCD-EFGH-JKLM/)
+    assert.doesNotMatch(`${login.stdout}${login.stderr}`, /pcc_live_authorized/)
+    const loginResult = JSON.parse(login.stdout)
+    assert.equal(loginResult.authenticated, true)
+    assert.equal(loginResult.source, 'credentials_file')
+
+    const credentials = JSON.parse(await readFile(credentialsFile, 'utf8'))
+    assert.equal(credentials.apiKey, 'pcc_live_authorized')
+    const modelsResult = await runRaw(['models', 'image'], env)
+    assert.equal(modelsResult.code, 0)
+    assert.equal(JSON.parse(modelsResult.stdout).data[0].id, 'image-model')
+    const modelRequest = requests.findLast((item) => item.url === '/v1/images/models')
+    assert.equal(modelRequest.authorization, 'Bearer pcc_live_authorized')
+
+    const status = await runRaw(['auth', 'status'], env)
+    assert.equal(JSON.parse(status.stdout).source, 'credentials_file')
+    const logout = await runRaw(['auth', 'logout'], env)
+    assert.equal(JSON.parse(logout.stdout).authenticated, false)
+    await assert.rejects(readFile(credentialsFile, 'utf8'), { code: 'ENOENT' })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
 })
 
 function run(args) {

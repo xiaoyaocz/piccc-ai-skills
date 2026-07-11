@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { extname, join } from 'node:path'
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { dirname, extname, join } from 'node:path'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled'])
 const MODEL_PATHS = {
@@ -22,6 +23,9 @@ Usage:
   piccc.mjs task get TASK_ID
   piccc.mjs task wait TASK_ID [--output-dir DIR] [--timeout MS] [--interval MS]
   piccc.mjs tasks [--type TYPE] [--status STATUS] [--page N] [--page-size N]
+  piccc.mjs auth login [--client-name NAME] [--timeout MS]
+  piccc.mjs auth status
+  piccc.mjs auth logout
 
 Generate options:
   --wait                 Wait for a terminal task status
@@ -29,7 +33,7 @@ Generate options:
   --external-id ID       Attach your own task identifier
 
 Run model discovery before generation. See references/api.md for media-specific options.
-Authentication: set PICCC_API_KEY in the environment.
+Authentication: run "piccc.mjs auth login" or set PICCC_API_KEY.
 `
 const { command, positional, options } = parseArgs(process.argv.slice(2))
 
@@ -40,6 +44,7 @@ try {
   else if (command === 'generate') output(await generateCommand())
   else if (command === 'task') output(await taskCommand())
   else if (command === 'tasks') output(await listTasks())
+  else if (command === 'auth') output(await authCommand())
   else usage()
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
@@ -48,6 +53,85 @@ try {
 
 async function models(type) {
   return request(MODEL_PATHS[type])
+}
+
+async function authCommand() {
+  const action = positional[0]
+  if (!['login', 'status', 'logout'].includes(action) || positional.length !== 1) usage()
+  validateOptions(action === 'login' ? ['client-name', 'timeout'] : [])
+  if (action === 'login') return login()
+  if (action === 'status') return credentialStatus()
+  return logout()
+}
+
+async function login() {
+  const started = await authRequest('/api/open-api/device/authorization', {
+    method: 'POST',
+    body: { clientName: option('client-name') || defaultClientName() },
+  })
+  const verificationUrl = String(started.verification_uri_complete || started.verification_uri || '')
+  if (!started.device_code || !verificationUrl) throw new Error('Piccc AI returned an invalid authorization response')
+  console.error('Open this link to authorize Piccc AI:')
+  console.error(verificationUrl)
+  if (started.user_code) console.error(`Verification code: ${started.user_code}`)
+
+  const expiresInMs = Math.max(1, Number(started.expires_in || 600)) * 1000
+  const timeout = integerOption('timeout') ?? expiresInMs
+  if (timeout <= 0) throw new Error('--timeout must be greater than 0')
+  const deadline = Date.now() + Math.min(timeout, expiresInMs)
+  let interval = Math.max(250, Number(started.interval || 5) * 1000)
+  while (Date.now() < deadline) {
+    await delay(interval)
+    try {
+      const token = await authRequest('/api/open-api/device/token', {
+        method: 'POST',
+        body: { device_code: started.device_code },
+      })
+      if (!token.api_key) throw new Error('Piccc AI did not return an API key')
+      const saved = await writeCredentials({
+        apiKey: token.api_key,
+        keyId: token.key_id || '',
+        keyPrefix: token.key_prefix || String(token.api_key).slice(0, 16),
+        createdAt: new Date().toISOString(),
+      })
+      return { ok: true, authenticated: true, source: 'credentials_file', key_prefix: token.key_prefix, credentials_file: saved }
+    } catch (error) {
+      const code = errorCode(error)
+      if (code === 'authorization_pending') continue
+      if (code === 'slow_down') {
+        interval += 5000
+        continue
+      }
+      if (code === 'access_denied') throw new Error('Authorization was denied')
+      if (code === 'expired_token') throw new Error('Authorization expired. Run auth login again')
+      throw error
+    }
+  }
+  throw new Error('Authorization timed out. Run auth login again')
+}
+
+async function credentialStatus() {
+  const environmentKey = process.env.PICCC_API_KEY?.trim()
+  if (environmentKey) {
+    return { authenticated: true, source: 'environment', key_prefix: environmentKey.slice(0, 16) }
+  }
+  const credentials = await readCredentials()
+  if (!credentials?.apiKey) return { authenticated: false, source: null }
+  return {
+    authenticated: true,
+    source: 'credentials_file',
+    key_prefix: credentials.keyPrefix || credentials.apiKey.slice(0, 16),
+    credentials_file: credentialsPath(),
+  }
+}
+
+async function logout() {
+  await rm(credentialsPath(), { force: true })
+  return {
+    ok: true,
+    authenticated: Boolean(process.env.PICCC_API_KEY?.trim()),
+    environment_override: Boolean(process.env.PICCC_API_KEY?.trim()),
+  }
 }
 
 async function modelsCommand() {
@@ -225,19 +309,82 @@ async function promptValue() {
 }
 
 async function request(path, init = {}) {
-  const key = process.env.PICCC_API_KEY?.trim()
-  if (!key) throw new Error('PICCC_API_KEY is required. Create one at https://picccai.cn/account?tab=apiKeys')
+  const key = await resolveApiKey()
+  if (!key) throw new Error('Piccc AI is not authorized. Run: node scripts/piccc.mjs auth login')
   const base = (process.env.PICCC_API_BASE_URL || 'https://api.picccai.cn').replace(/\/+$/, '')
-  const response = await fetch(`${base}${path}`, {
+  return fetchJson(`${base}${path}`, {
     method: init.method || 'GET',
     headers: { Authorization: `Bearer ${key}`, Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
     body: init.body ? JSON.stringify(init.body) : undefined,
   })
+}
+
+async function authRequest(path, init = {}) {
+  const base = (process.env.PICCC_AUTH_BASE_URL || 'https://picccai.cn').replace(/\/+$/, '')
+  return fetchJson(`${base}${path}`, {
+    method: init.method || 'GET',
+    headers: { Accept: 'application/json', ...(init.body ? { 'Content-Type': 'application/json' } : {}) },
+    body: init.body ? JSON.stringify(init.body) : undefined,
+  })
+}
+
+async function fetchJson(url, init) {
+  const response = await fetch(url, init)
   const text = await response.text()
   let data
   try { data = text ? JSON.parse(text) : null } catch { data = text }
-  if (!response.ok) throw new Error(`Piccc API ${response.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`)
+  if (!response.ok) {
+    const code = typeof data === 'object' && data ? String(data.statusMessage || data.error || data.message || '') : ''
+    const error = new Error(`Piccc API ${response.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`)
+    error.code = code
+    error.status = response.status
+    throw error
+  }
   return data
+}
+
+function credentialsPath() {
+  return process.env.PICCC_CREDENTIALS_FILE || join(homedir(), '.piccc-ai', 'credentials.json')
+}
+
+async function readCredentials() {
+  try {
+    const parsed = JSON.parse(await readFile(credentialsPath(), 'utf8'))
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error instanceof SyntaxError) return null
+    throw error
+  }
+}
+
+async function writeCredentials(credentials) {
+  const path = credentialsPath()
+  const directory = dirname(path)
+  const temporary = `${path}.${process.pid}.tmp`
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  await writeFile(temporary, `${JSON.stringify(credentials, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+  await rename(temporary, path)
+  await chmod(path, 0o600).catch(() => undefined)
+  return path
+}
+
+async function resolveApiKey() {
+  const environmentKey = process.env.PICCC_API_KEY?.trim()
+  if (environmentKey) return environmentKey
+  const credentials = await readCredentials()
+  return String(credentials?.apiKey || '').trim()
+}
+
+function defaultClientName() {
+  return `Piccc AI Skill (${process.platform})`
+}
+
+function errorCode(error) {
+  return error && typeof error === 'object' ? String(error.code || '') : ''
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
 function parseArgs(args) {
@@ -279,4 +426,4 @@ function booleanOption(name) { return options[name] == null ? undefined : flag(n
 function compact(value) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== '')) }
 function safeName(value) { return String(value || 'piccc-output').replace(/[^a-z0-9_.-]+/gi, '_') }
 function output(value) { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
-function usage() { throw new Error('Usage: piccc.mjs models TYPE | voices --model ID | generate TYPE --model ID (--prompt TEXT | --prompt-file FILE) | task get|wait TASK_ID | tasks [filters]') }
+function usage() { throw new Error('Usage: piccc.mjs models TYPE | voices --model ID | generate TYPE --model ID (--prompt TEXT | --prompt-file FILE) | task get|wait TASK_ID | tasks [filters] | auth login|status|logout') }

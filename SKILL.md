@@ -9,7 +9,7 @@ Use `{baseDir}/scripts/piccc.mjs` for every Piccc AI request. `{baseDir}` is the
 
 ## Before the first request
 
-Check `PICCC_API_KEY`. If it is unavailable, direct the user to [皮可AI个人中心](https://picccai.cn/account?tab=apiKeys). Tell them to sign in, open “API Key,” create a key, and save it immediately because the complete key is shown only once. Never ask the user to paste the key into chat; have them store it in the Agent's environment or secret manager.
+Run `node {baseDir}/scripts/piccc.mjs auth status`. If it reports `authenticated: false`, run `node {baseDir}/scripts/piccc.mjs auth login`, give the user the displayed authorization link and verification code, and wait for the command to finish. Never ask the user to create, copy, or paste an API Key.
 
 ## Workflow
 
@@ -35,6 +35,9 @@ node {baseDir}/scripts/piccc.mjs generate audio --model MODEL_ID --prompt-file S
 node {baseDir}/scripts/piccc.mjs task get TASK_ID
 node {baseDir}/scripts/piccc.mjs task wait TASK_ID --output-dir OUTPUT_DIR
 node {baseDir}/scripts/piccc.mjs tasks --type image --status completed --page 1 --page-size 20
+node {baseDir}/scripts/piccc.mjs auth login
+node {baseDir}/scripts/piccc.mjs auth status
+node {baseDir}/scripts/piccc.mjs auth logout
 node {baseDir}/scripts/piccc.mjs --help
 ```
 
@@ -44,6 +47,7 @@ Read [references/api.md](references/api.md) when selecting generation parameters
 
 - Ask for clarification only when a missing creative choice would materially change the result.
 - Never claim success before status is `completed` and at least one output URL exists.
-- Never expose the API Key in command arguments, prompts, logs, or files.
+- Never expose the API Key in command arguments, prompts, logs, or project files. Let the script manage its private credentials file.
+- Always use the authorization command for first-time setup; do not teach environment-variable setup unless the user explicitly requests it.
 - Do not create a replacement task while checking status; task reads must not trigger new charges.
 - Preserve the API response when reporting parameter, content-policy, billing, or upstream failures.

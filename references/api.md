@@ -1,10 +1,14 @@
 # Piccc AI 媒体接口
 
-## 准备 API Key
+## 连接账号
 
-前往[皮可AI（Piccc AI）个人中心](https://picccai.cn/account?tab=apiKeys)，登录后进入“API Key”，创建并立即保存密钥。完整密钥只显示一次。
+首次使用时运行：
 
-脚本从 `PICCC_API_KEY` 环境变量读取密钥。
+```bash
+node scripts/piccc.mjs auth login
+```
+
+打开命令显示的链接，登录皮可AI并确认授权。脚本会自动创建并保存 API Key，不要让用户在对话中发送密钥。
 
 ## 模型接口
 

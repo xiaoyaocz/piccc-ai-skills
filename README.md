@@ -20,23 +20,15 @@ npx skills add xiaoyaocz/piccc-ai-skills
 
 安装程序会识别仓库中的 `piccc-ai` 技能，并让你选择 Codex、OpenClaw 或其他已支持的 Agent。
 
-## 创建 API Key
+## 连接皮可AI账号
 
-前往[皮可AI个人中心](https://picccai.cn/account?tab=apiKeys)，登录后打开“API Key”，创建并立即保存密钥。完整密钥只显示一次。
+安装后告诉 Agent：
 
-首次使用前，把密钥保存到 `PICCC_API_KEY` 环境变量或 Agent 的密钥管理中。不要把密钥发到对话里，也不要提交到仓库。
-
-macOS 或 Linux：
-
-```bash
-export PICCC_API_KEY="你的 API Key"
+```text
+连接我的皮可AI账号
 ```
 
-PowerShell：
-
-```powershell
-$env:PICCC_API_KEY = "你的 API Key"
-```
+Agent 会生成一个授权链接。打开链接，登录皮可AI并确认授权即可；API Key 会自动创建并保存在本机，不需要复制密钥或配置环境变量。
 
 ## 使用
 
@@ -55,6 +47,18 @@ $env:PICCC_API_KEY = "你的 API Key"
 ```
 
 技能会先读取后台当前可用的模型和参数，不会固定模型名称。
+
+查看当前授权状态：
+
+```bash
+node scripts/piccc.mjs auth status
+```
+
+取消本机授权：
+
+```bash
+node scripts/piccc.mjs auth logout
+```
 
 ## 手动安装
 
