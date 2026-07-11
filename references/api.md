@@ -20,6 +20,22 @@ node scripts/piccc.mjs auth login
 
 每次创建任务前使用模型响应中的 `data[].id`。音色使用 `voice_presets[].id`，不要传显示名称。
 
+## 经济规格
+
+默认先运行：
+
+```bash
+node scripts/piccc.mjs models image --economy
+```
+
+将 `image` 换成 `video` 或 `audio`。命令会返回推荐模型、`defaults`、`special_offer` 和 `warning`。
+
+- 用户没有指定时，使用 `defaults` 中的低分辨率、低质量、单个输出、最短视频时长和低采样率。
+- 默认关闭视频音频、联网搜索和不必要的参考素材。
+- 用户明确要求高清、高质量、更长时长或指定模型时，以用户要求为准。
+- `special_offer=true` 时，创建任务前提示：“特价模型可能生成较慢、稳定性较差。”
+- 即使没有运行 `--economy`，生成脚本也会为未传参数补上当前模型支持的经济规格。
+
 ## 创建任务
 
 图片：`POST /v1/images/tasks`

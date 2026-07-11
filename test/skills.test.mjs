@@ -20,9 +20,16 @@ test.before(async () => {
     requests.push({ method: request.method, url: request.url, body, authorization: request.headers.authorization })
     response.setHeader('Content-Type', 'application/json')
 
-    if (request.url === '/v1/images/models') return response.end(JSON.stringify({ object: 'list', data: [{ id: 'image-model' }] }))
-    if (request.url === '/v1/videos/models') return response.end(JSON.stringify({ object: 'list', data: [{ id: 'video-model' }] }))
-    if (request.url === '/v1/audio/models') return response.end(JSON.stringify({ object: 'list', data: [{ id: 'audio-model', voice_presets: [{ id: 'voice-1', name: '中文女声' }] }] }))
+    if (request.url === '/v1/images/models') return response.end(JSON.stringify({ object: 'list', data: [
+      { id: 'image-model', name: 'Image Model', supported_resolutions: ['2K', '0.5K', '1K'], supported_qualities: ['high', 'low', 'medium'] },
+      { id: 'special-image', name: '特价图片模型', description: '优惠生成通道', supported_resolutions: ['1K'], supported_qualities: ['standard'] },
+    ] }))
+    if (request.url === '/v1/videos/models') return response.end(JSON.stringify({ object: 'list', data: [{
+      id: 'video-model', name: 'Video Mini', supported_resolutions: ['720p', '480p'], duration: { min: 5, max: 10, step: 1 }, route_modes: ['standard', 'no_real_face'], reference_modes: ['text_to_video'],
+    }] }))
+    if (request.url === '/v1/audio/models') return response.end(JSON.stringify({ object: 'list', data: [{
+      id: 'audio-model', name: 'Audio Model', supported_formats: ['wav', 'mp3'], supported_sample_rates: [48000, 16000, 24000], reference_modes: ['text'], voice_presets: [{ id: 'voice-1', name: '中文女声' }],
+    }] }))
     if (request.url === '/v1/images/tasks') return response.end(JSON.stringify({ task_id: 'task-image', status: 'queued' }))
     if (request.url === '/v1/videos/tasks') return response.end(JSON.stringify({ task_id: 'task-video', status: 'queued' }))
     if (request.url === '/v1/audio/tasks') return response.end(JSON.stringify({ task_id: 'task-audio', status: 'queued' }))
@@ -68,6 +75,17 @@ test('one skill lists image, video, and audio models', async () => {
   assert.ok(requests.slice(-3).every((item) => item.authorization === 'Bearer test-key'))
 })
 
+test('economy model selection includes low-cost defaults and special-offer warning', async () => {
+  const result = await run(['models', 'image', '--economy'])
+  assert.equal(result.object, 'economy_selection')
+  assert.equal(result.model.id, 'special-image')
+  assert.equal(result.defaults.resolution, '1K')
+  assert.equal(result.defaults.quality, 'standard')
+  assert.equal(result.defaults.n, 1)
+  assert.equal(result.special_offer, true)
+  assert.match(result.warning, /特价模型可能生成较慢、稳定性较差/)
+})
+
 test('voice search returns live voice IDs', async () => {
   const result = await run(['voices', '--model', 'audio-model', '--search', '中文'])
   assert.equal(result.data[0].id, 'voice-1')
@@ -82,6 +100,10 @@ test('image generation waits and downloads output', async () => {
     const submitted = requests.findLast((item) => item.url === '/v1/images/tasks')
     assert.equal(submitted.body.prompt, 'a red kite')
     assert.equal(submitted.body.model, 'image-model')
+    assert.equal(submitted.body.resolution, '0.5K')
+    assert.equal(submitted.body.quality, 'low')
+    assert.equal(submitted.body.n, 1)
+    assert.equal(submitted.body.web_search, false)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }
@@ -93,12 +115,27 @@ test('video generation maps shared CLI options', async () => {
   const submitted = requests.findLast((item) => item.url === '/v1/videos/tasks')
   assert.equal(submitted.body.duration_seconds, 5)
   assert.equal(submitted.body.aspect_ratio, '16:9')
+  assert.equal(submitted.body.resolution, '480p')
+  assert.equal(submitted.body.route_mode, 'no_real_face')
+  assert.equal(submitted.body.reference_mode, 'text_to_video')
+  assert.equal(submitted.body.audio, false)
+  assert.equal(submitted.body.web_search, false)
 })
 
 test('audio generation marks the initial charge as a precharge', async () => {
   const result = await run(['generate', 'audio', '--model', 'audio-model', '--prompt', 'hello'])
   assert.equal(result.billing.precharge_credits, 10)
   assert.equal(result.billing.final_cost_available_after_completion, true)
+  const submitted = requests.findLast((item) => item.url === '/v1/audio/tasks')
+  assert.equal(submitted.body.output_format, 'mp3')
+  assert.equal(submitted.body.sample_rate, 16000)
+  assert.equal(submitted.body.reference_mode, 'text')
+})
+
+test('special-offer generation prints a reliability warning', async () => {
+  const result = await runRaw(['generate', 'image', '--model', 'special-image', '--prompt', 'draft'])
+  assert.equal(result.code, 0)
+  assert.match(result.stderr, /特价模型可能生成较慢、稳定性较差/)
 })
 
 test('task commands query and filter existing tasks', async () => {

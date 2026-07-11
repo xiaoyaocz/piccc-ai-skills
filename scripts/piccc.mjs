@@ -17,7 +17,7 @@ const TASK_PATHS = {
 const HELP = `Piccc AI media task CLI
 
 Usage:
-  piccc.mjs models image|video|audio
+  piccc.mjs models image|video|audio [--economy]
   piccc.mjs voices --model ID [--search TEXT]
   piccc.mjs generate image|video|audio --model ID (--prompt TEXT | --prompt-file FILE) [options]
   piccc.mjs task get TASK_ID
@@ -135,8 +135,10 @@ async function logout() {
 }
 
 async function modelsCommand() {
-  validateInvocation(1, [])
-  return models(requiredMediaType(positional[0]))
+  validateInvocation(1, ['economy'])
+  const type = requiredMediaType(positional[0])
+  const response = await models(type)
+  return flag('economy') ? economySelection(type, response) : response
 }
 
 async function voices() {
@@ -167,11 +169,17 @@ async function generateCommand() {
 }
 
 async function generate(type) {
+  const response = await models(type)
+  const modelId = required('model')
+  const model = (response.data || []).find((item) => item.id === modelId)
+  if (!model) throw new Error(`${type} model not found: ${modelId}`)
+  const warning = specialOfferWarning(model)
+  if (warning) console.error(`[piccc-ai] ${warning}`)
   const body = type === 'image'
-    ? await imageBody()
+    ? await imageBody(model)
     : type === 'video'
-      ? await videoBody()
-      : await audioBody()
+      ? await videoBody(model)
+      : await audioBody(model)
   const created = await request(TASK_PATHS[type], { method: 'POST', body })
   if (!flag('wait')) {
     return type === 'audio'
@@ -184,42 +192,42 @@ async function generate(type) {
   return { ...task, downloads }
 }
 
-async function imageBody() {
+async function imageBody(model) {
   return compact({
     model: required('model'),
     prompt: await promptValue(),
     aspect_ratio: option('aspect-ratio'),
-    resolution: option('resolution'),
-    quality: option('quality'),
-    n: integerOption('n'),
-    web_search: booleanOption('web-search'),
+    resolution: option('resolution') || lowestResolution(model.supported_resolutions),
+    quality: option('quality') || lowestQuality(model.supported_qualities),
+    n: integerOption('n') ?? 1,
+    web_search: booleanOption('web-search') ?? false,
     external_id: option('external-id'),
   })
 }
 
-async function videoBody() {
+async function videoBody(model) {
   return compact({
     model: required('model'),
     prompt: await promptValue(),
-    route_mode: option('route-mode'),
-    reference_mode: option('reference-mode'),
-    resolution: option('resolution'),
+    route_mode: option('route-mode') || preferredChoice(model.route_modes, ['no_real_face', 'standard']),
+    reference_mode: option('reference-mode') || preferredChoice(model.reference_modes, ['text_to_video', 'text']),
+    resolution: option('resolution') || lowestResolution(model.supported_resolutions),
     aspect_ratio: option('aspect-ratio'),
-    duration_seconds: integerOption('duration'),
-    audio: booleanOption('audio'),
-    web_search: booleanOption('web-search'),
+    duration_seconds: integerOption('duration') ?? positiveInteger(model.duration?.min),
+    audio: booleanOption('audio') ?? false,
+    web_search: booleanOption('web-search') ?? false,
     external_id: option('external-id'),
   })
 }
 
-async function audioBody() {
+async function audioBody(model) {
   const audioReference = option('audio-reference')
   const imageReference = option('image-reference')
   return compact({
     model: required('model'),
     prompt: await promptValue(),
-    output_format: option('format'),
-    sample_rate: integerOption('sample-rate'),
+    output_format: option('format') || preferredChoice(model.supported_formats, ['mp3', 'ogg_opus', 'aac', 'wav']),
+    sample_rate: integerOption('sample-rate') ?? lowestPositiveNumber(model.supported_sample_rates),
     speech_rate: numberOption('speech-rate'),
     loudness_rate: numberOption('loudness-rate'),
     pitch_rate: numberOption('pitch-rate'),
@@ -229,6 +237,132 @@ async function audioBody() {
     image_references: imageReference ? [imageReference] : undefined,
     external_id: option('external-id'),
   })
+}
+
+function economySelection(type, response) {
+  const items = Array.isArray(response?.data) ? response.data : []
+  if (!items.length) throw new Error(`No ${type} models are currently available`)
+  const model = [...items].sort((left, right) => compareEconomyModels(type, left, right))[0]
+  return {
+    object: 'economy_selection',
+    type,
+    model,
+    defaults: economyDefaults(type, model),
+    special_offer: isSpecialOfferModel(model),
+    warning: specialOfferWarning(model),
+  }
+}
+
+function economyDefaults(type, model) {
+  if (type === 'image') {
+    return compact({
+      resolution: lowestResolution(model.supported_resolutions),
+      quality: lowestQuality(model.supported_qualities),
+      n: 1,
+      web_search: false,
+    })
+  }
+  if (type === 'video') {
+    return compact({
+      route_mode: preferredChoice(model.route_modes, ['no_real_face', 'standard']),
+      reference_mode: preferredChoice(model.reference_modes, ['text_to_video', 'text']),
+      resolution: lowestResolution(model.supported_resolutions),
+      duration_seconds: positiveInteger(model.duration?.min),
+      audio: false,
+      web_search: false,
+    })
+  }
+  return compact({
+    output_format: preferredChoice(model.supported_formats, ['mp3', 'ogg_opus', 'aac', 'wav']),
+    sample_rate: lowestPositiveNumber(model.supported_sample_rates),
+    reference_mode: preferredChoice(model.reference_modes, ['text']),
+  })
+}
+
+function compareEconomyModels(type, left, right) {
+  const leftPrice = minimumAdvertisedPrice(left)
+  const rightPrice = minimumAdvertisedPrice(right)
+  if (leftPrice !== rightPrice) return leftPrice - rightPrice
+  const leftTextScore = economyTextScore(left)
+  const rightTextScore = economyTextScore(right)
+  if (leftTextScore !== rightTextScore) return leftTextScore - rightTextScore
+  if (type !== 'audio') {
+    const leftResolution = resolutionWeight(lowestResolution(left.supported_resolutions))
+    const rightResolution = resolutionWeight(lowestResolution(right.supported_resolutions))
+    if (leftResolution !== rightResolution) return leftResolution - rightResolution
+  }
+  return 0
+}
+
+function minimumAdvertisedPrice(model) {
+  const direct = [model.minimum_credits, model.estimated_min_credits, model.base_cost]
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  const pricing = model.pricing && typeof model.pricing === 'object' ? model.pricing : {}
+  const resolutionPrices = (model.supported_resolutions || [])
+    .map((resolution) => Number(pricing[resolution]))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  const recurring = [pricing.creditsPerSecond, pricing.baseCreditsPerSecond, pricing.minimumCredits, pricing.taskCredits]
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value >= 0)
+  const values = [...direct, ...resolutionPrices, ...recurring]
+  return values.length ? Math.min(...values) : Number.POSITIVE_INFINITY
+}
+
+function economyTextScore(model) {
+  const text = `${model.id || ''} ${model.name || ''} ${model.description || ''}`.toLowerCase()
+  if (isSpecialOfferModel(model)) return -200
+  if (/\b(mini|lite|economy|budget|low[ -]?cost|flash|fast)\b|优惠|经济/.test(text)) return -100
+  if (/\b(pro|ultra|premium|quality)\b|旗舰|高质量/.test(text)) return 100
+  return 0
+}
+
+function isSpecialOfferModel(model) {
+  const text = `${model.id || ''} ${model.name || ''} ${model.description || ''}`.toLowerCase()
+  return /特价|折扣|限时优惠|special[ -]?(offer|price)?|discount|promo/.test(text)
+}
+
+function specialOfferWarning(model) {
+  return isSpecialOfferModel(model) ? '特价模型可能生成较慢、稳定性较差。' : ''
+}
+
+function lowestResolution(values) {
+  const items = Array.isArray(values) ? values.filter(Boolean).map(String) : []
+  return [...items].sort((left, right) => resolutionWeight(left) - resolutionWeight(right))[0]
+}
+
+function resolutionWeight(value) {
+  const text = String(value || '').toLowerCase()
+  const k = text.match(/([0-9.]+)\s*k/)
+  if (k) return Number(k[1]) * 1000
+  const p = text.match(/([0-9.]+)\s*p/)
+  if (p) return Number(p[1])
+  const dimensions = text.match(/([0-9]+)\s*[x×]\s*([0-9]+)/)
+  if (dimensions) return Math.sqrt(Number(dimensions[1]) * Number(dimensions[2]))
+  return Number.POSITIVE_INFINITY
+}
+
+function lowestQuality(values) {
+  return preferredChoice(values, ['draft', 'economy', 'low', 'standard', 'auto', 'medium', 'high', 'hd', 'ultra'])
+}
+
+function preferredChoice(values, preferences) {
+  const items = Array.isArray(values) ? values.filter(Boolean).map(String) : []
+  for (const preference of preferences) {
+    const match = items.find((item) => item.toLowerCase() === preference)
+    if (match) return match
+  }
+  return items[0]
+}
+
+function lowestPositiveNumber(values) {
+  const items = Array.isArray(values) ? values.map(Number).filter((value) => Number.isFinite(value) && value > 0) : []
+  return items.length ? Math.min(...items) : undefined
+}
+
+function positiveInteger(value) {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? Math.trunc(number) : undefined
 }
 
 async function taskCommand() {
