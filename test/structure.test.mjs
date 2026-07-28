@@ -36,3 +36,10 @@ test('Codex metadata names the skill in its default prompt', async () => {
   const source = await readFile(resolve(root, 'agents', 'openai.yaml'), 'utf8')
   assert.match(source, /default_prompt: "[^"]*\$piccc-ai[^"]*"/)
 })
+
+test('skill requires post-install authorization guidance and balance reporting', async () => {
+  const source = await readFile(resolve(root, 'SKILL.md'), 'utf8')
+  assert.match(source, /skill has just been installed/)
+  assert.match(source, /available_credits/)
+  assert.match(source, /user's current language/)
+})

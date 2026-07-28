@@ -11,6 +11,7 @@ const script = 'scripts/piccc.mjs'
 let server
 let baseUrl
 let deviceTokenRequests = 0
+let callbackPageRequest
 const requests = []
 
 test.before(async () => {
@@ -21,6 +22,7 @@ test.before(async () => {
     requests.push({ method: request.method, url: request.url, body, authorization: request.headers.authorization })
     response.setHeader('Content-Type', 'application/json')
 
+    if (request.url === '/v1/user') return response.end(JSON.stringify({ id: 'user-1', credits: 321.5, membership: { level: 'free', active: true } }))
     if (request.url === '/v1/images/models') return response.end(JSON.stringify({ object: 'list', data: [
       { id: 'image-model', name: 'Image Model', supported_resolutions: ['2K', '0.5K', '1K'], supported_qualities: ['high', 'low', 'medium'] },
       { id: 'special-image', name: '特价图片模型', description: '优惠生成通道', supported_resolutions: ['1K'], supported_qualities: ['standard'] },
@@ -43,7 +45,11 @@ test.before(async () => {
         verificationParams.set('redirect_uri', body.redirect_uri)
         const callbackUrl = new URL(body.redirect_uri)
         callbackUrl.searchParams.set('result', 'approved')
-        setTimeout(() => fetch(callbackUrl).catch(() => undefined), 50)
+        callbackPageRequest = new Promise((resolveCallback) => {
+          setTimeout(() => {
+            resolveCallback(fetch(callbackUrl, { headers: { 'Accept-Language': 'zh-CN' } }).then((result) => result.text()))
+          }, 50)
+        })
       }
       return response.end(JSON.stringify({
         device_code: 'device-code',
@@ -179,7 +185,7 @@ test('missing credentials point to device authorization', async () => {
 test('help works without an API key', async () => {
   const result = await runRaw(['--help'], { PICCC_API_KEY: '', PICCC_API_BASE_URL: '' })
   assert.equal(result.code, 0)
-  assert.match(result.stdout, /Piccc AI media task CLI/)
+  assert.match(result.stdout, /Piccc AI \(皮可AI\) media task CLI/)
   assert.match(result.stdout, /PICCC_API_KEY/)
 })
 
@@ -197,6 +203,13 @@ test('output directory requires waiting for the task', async () => {
   assert.match(result.stderr, /--output-dir requires --wait/)
 })
 
+test('credits returns the current available balance', async () => {
+  const result = await run(['credits'])
+  assert.equal(result.available_credits, 321.5)
+  const request = requests.findLast((item) => item.url === '/v1/user')
+  assert.equal(request.authorization, 'Bearer test-key')
+})
+
 test('device authorization saves credentials and uses them automatically', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'piccc-skills-auth-'))
   const credentialsFile = join(directory, 'credentials.json')
@@ -211,6 +224,8 @@ test('device authorization saves credentials and uses them automatically', async
     const login = await runRaw(['auth', 'login', '--client-name', 'Codex test', '--timeout', '5000'], env)
     assert.equal(login.code, 0)
     assert.equal(deviceTokenRequests, 2)
+    assert.match(await callbackPageRequest, /授权已完成/)
+    assert.doesNotMatch(await callbackPageRequest, /Authorization complete/)
     assert.match(login.stderr, /authorize\/device\?user_code=ABCD-EFGH-JKLM/)
     const authorizationRequest = requests.findLast((item) => item.url === '/api/open-api/device/authorization')
     assert.match(authorizationRequest.body.redirect_uri, /^http:\/\/127\.0\.0\.1:\d+\/piccc-ai\/authorized\?state=/)
@@ -218,9 +233,12 @@ test('device authorization saves credentials and uses them automatically', async
     const loginResult = JSON.parse(login.stdout)
     assert.equal(loginResult.authenticated, true)
     assert.equal(loginResult.source, 'credentials_file')
+    assert.equal(loginResult.available_credits, 321.5)
 
     const credentials = JSON.parse(await readFile(credentialsFile, 'utf8'))
     assert.equal(credentials.apiKey, 'pcc_live_authorized')
+    const balanceRequest = requests.findLast((item) => item.url === '/v1/user')
+    assert.equal(balanceRequest.authorization, 'Bearer pcc_live_authorized')
     const modelsResult = await runRaw(['models', 'image'], env)
     assert.equal(modelsResult.code, 0)
     assert.equal(JSON.parse(modelsResult.stdout).data[0].id, 'image-model')

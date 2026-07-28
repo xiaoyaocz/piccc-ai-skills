@@ -1,4 +1,4 @@
 interface:
-  display_name: "皮可AI（Piccc AI）"
-  short_description: "使用皮可AI生成图片、视频和音频，并下载异步任务结果"
-  default_prompt: "Use $piccc-ai to create media with Piccc AI and download the completed result."
+  display_name: "Piccc AI (皮可AI)"
+  short_description: "Generate and download images, videos, and audio"
+  default_prompt: "Use $piccc-ai to authorize my account and report my available credits."

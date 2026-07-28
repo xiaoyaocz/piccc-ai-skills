@@ -17,7 +17,7 @@ const TASK_PATHS = {
   video: '/v1/videos/tasks',
   audio: '/v1/audio/tasks',
 }
-const HELP = `Piccc AI media task CLI
+const HELP = `Piccc AI (皮可AI) media task CLI
 
 Usage:
   piccc.mjs models image|video|audio [--economy]
@@ -29,6 +29,7 @@ Usage:
   piccc.mjs auth login [--client-name NAME] [--timeout MS] [--no-browser]
   piccc.mjs auth status
   piccc.mjs auth logout
+  piccc.mjs credits
 
 Generate options:
   --wait                 Wait for a terminal task status
@@ -36,7 +37,7 @@ Generate options:
   --external-id ID       Attach your own task identifier
 
 Run model discovery before generation. See references/api.md for media-specific options.
-Authentication: run "piccc.mjs auth login" or set PICCC_API_KEY.
+Authentication: run "piccc.mjs auth login"; use PICCC_API_KEY only when explicitly needed.
 `
 const { command, positional, options } = parseArgs(process.argv.slice(2))
 
@@ -48,6 +49,7 @@ try {
   else if (command === 'task') output(await taskCommand())
   else if (command === 'tasks') output(await listTasks())
   else if (command === 'auth') output(await authCommand())
+  else if (command === 'credits') output(await creditsCommand())
   else usage()
 } catch (error) {
   console.error(error instanceof Error ? error.message : String(error))
@@ -78,13 +80,13 @@ async function login() {
       },
     })
     let verificationUrl = String(started.verification_uri_complete || started.verification_uri || '')
-    if (!started.device_code || !verificationUrl) throw new Error('Piccc AI returned an invalid authorization response')
+    if (!started.device_code || !verificationUrl) throw new Error('Piccc AI (皮可AI) returned an invalid authorization response')
     if (loopback) verificationUrl = withRedirectUri(verificationUrl, loopback.redirectUri)
 
     const opened = loopback && !environmentFlag('PICCC_NO_BROWSER')
       ? await openBrowser(verificationUrl)
       : false
-    console.error(opened ? 'Authorization opened in your browser:' : 'Open this link to authorize Piccc AI:')
+    console.error(opened ? 'Authorization opened in your browser:' : 'Open this link to authorize Piccc AI (皮可AI):')
     console.error(verificationUrl)
     if (started.user_code) console.error(`Verification code: ${started.user_code}`)
     if (opened) console.error('Complete authorization in the browser. This command will continue automatically.')
@@ -103,7 +105,7 @@ async function login() {
           method: 'POST',
           body: { device_code: started.device_code },
         })
-        if (!token.api_key) throw new Error('Piccc AI did not return an API key')
+        if (!token.api_key) throw new Error('Piccc AI (皮可AI) did not return an API key')
         if (callbackCompletion) {
           await Promise.race([callbackCompletion, delay(1500)])
         }
@@ -113,7 +115,22 @@ async function login() {
           keyPrefix: token.key_prefix || String(token.api_key).slice(0, 16),
           createdAt: new Date().toISOString(),
         })
-        return { ok: true, authenticated: true, source: 'credentials_file', key_prefix: token.key_prefix, credentials_file: saved }
+        let availableCredits = null
+        let creditsQueryError = ''
+        try {
+          availableCredits = await queryAvailableCredits()
+        } catch (error) {
+          creditsQueryError = error instanceof Error ? error.message : String(error)
+        }
+        return {
+          ok: true,
+          authenticated: true,
+          source: 'credentials_file',
+          key_prefix: token.key_prefix,
+          credentials_file: saved,
+          available_credits: availableCredits,
+          ...(creditsQueryError ? { credits_query_error: creditsQueryError } : {}),
+        }
       } catch (error) {
         const code = errorCode(error)
         if (code === 'authorization_pending') continue
@@ -130,6 +147,18 @@ async function login() {
   } finally {
     await loopback?.close()
   }
+}
+
+async function creditsCommand() {
+  validateInvocation(0, [])
+  return { available_credits: await queryAvailableCredits() }
+}
+
+async function queryAvailableCredits() {
+  const account = await request('/v1/user')
+  const value = Number(account?.credits)
+  if (!Number.isFinite(value)) throw new Error('Piccc AI (皮可AI) did not return a valid available credit balance')
+  return value
 }
 
 async function credentialStatus() {
@@ -466,7 +495,7 @@ async function promptValue() {
 
 async function request(path, init = {}) {
   const key = await resolveApiKey()
-  if (!key) throw new Error('Piccc AI is not authorized. Run: node scripts/piccc.mjs auth login')
+  if (!key) throw new Error('Piccc AI (皮可AI) is not authorized. Run: node scripts/piccc.mjs auth login')
   const base = (process.env.PICCC_API_BASE_URL || 'https://api.picccai.cn').replace(/\/+$/, '')
   return fetchJson(`${base}${path}`, {
     method: init.method || 'GET',
@@ -512,7 +541,7 @@ async function startLoopbackCallback() {
       'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'",
       'X-Content-Type-Options': 'nosniff',
     })
-    response.end(loopbackResultHtml(result))
+    response.end(loopbackResultHtml(result, request.headers['accept-language']))
     if (!completed) {
       completed = true
       resolveCompletion(result)
@@ -544,12 +573,15 @@ async function startLoopbackCallback() {
   }
 }
 
-function loopbackResultHtml(result) {
+function loopbackResultHtml(result, acceptLanguage = '') {
   const approved = result === 'approved'
-  const title = approved ? '授权已完成 · Authorization complete' : '授权未完成 · Authorization not completed'
-  const description = approved
-    ? '可以关闭此页面并返回 Agent。You can close this page and return to the agent.'
-    : '可以关闭此页面并返回 Agent 重试。You can close this page and try again from the agent.'
+  const chinese = /^zh(?:-|,|;|$)/i.test(String(acceptLanguage))
+  const title = chinese
+    ? approved ? '授权已完成' : '授权未完成'
+    : approved ? 'Authorization complete' : 'Authorization not completed'
+  const description = chinese
+    ? approved ? '可以关闭此页面并返回智能体。' : '可以关闭此页面并返回智能体重试。'
+    : approved ? 'You can close this page and return to the agent.' : 'You can close this page and try again from the agent.'
   const color = approved ? '#16a34a' : '#d97706'
   return `<!doctype html>
 <html lang="zh-CN">
@@ -629,7 +661,7 @@ async function fetchJson(url, init) {
   try { data = text ? JSON.parse(text) : null } catch { data = text }
   if (!response.ok) {
     const code = typeof data === 'object' && data ? String(data.statusMessage || data.error || data.message || '') : ''
-    const error = new Error(`Piccc API ${response.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`)
+    const error = new Error(`Piccc AI (皮可AI) API ${response.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`)
     error.code = code
     error.status = response.status
     throw error
@@ -670,7 +702,7 @@ async function resolveApiKey() {
 }
 
 function defaultClientName() {
-  return `Piccc AI Skill (${process.platform})`
+  return `Piccc AI (皮可AI) Skill (${process.platform})`
 }
 
 function errorCode(error) {
@@ -720,4 +752,4 @@ function booleanOption(name) { return options[name] == null ? undefined : flag(n
 function compact(value) { return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== '')) }
 function safeName(value) { return String(value || 'piccc-output').replace(/[^a-z0-9_.-]+/gi, '_') }
 function output(value) { process.stdout.write(`${JSON.stringify(value, null, 2)}\n`) }
-function usage() { throw new Error('Usage: piccc.mjs models TYPE | voices --model ID | generate TYPE --model ID (--prompt TEXT | --prompt-file FILE) | task get|wait TASK_ID | tasks [filters] | auth login|status|logout') }
+function usage() { throw new Error('Usage: piccc.mjs models TYPE | voices --model ID | generate TYPE --model ID (--prompt TEXT | --prompt-file FILE) | task get|wait TASK_ID | tasks [filters] | auth login|status|logout | credits') }
