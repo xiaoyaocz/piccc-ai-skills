@@ -10,6 +10,7 @@ const root = resolve(import.meta.dirname, '..')
 const script = 'scripts/piccc.mjs'
 let server
 let baseUrl
+let deviceTokenRequests = 0
 const requests = []
 
 test.before(async () => {
@@ -37,16 +38,28 @@ test.before(async () => {
     if (request.url === '/v1/tasks/task-audio') return response.end(JSON.stringify({ task_id: 'task-audio', type: 'audio', status: 'completed', progress: 100, actual_cost: 7, outputs: [] }))
     if (request.url?.startsWith('/v1/tasks?')) return response.end(JSON.stringify({ items: [{ task_id: 'task-image', type: 'image', status: 'completed' }], page: 1, page_size: 20 }))
     if (request.url === '/api/open-api/device/authorization') {
+      const verificationParams = new URLSearchParams({ user_code: 'ABCD-EFGH-JKLM' })
+      if (body.redirect_uri) {
+        verificationParams.set('redirect_uri', body.redirect_uri)
+        const callbackUrl = new URL(body.redirect_uri)
+        callbackUrl.searchParams.set('result', 'approved')
+        setTimeout(() => fetch(callbackUrl).catch(() => undefined), 50)
+      }
       return response.end(JSON.stringify({
         device_code: 'device-code',
         user_code: 'ABCD-EFGH-JKLM',
         verification_uri: `${baseUrl}/authorize/device`,
-        verification_uri_complete: `${baseUrl}/authorize/device?user_code=ABCD-EFGH-JKLM`,
+        verification_uri_complete: `${baseUrl}/authorize/device?${verificationParams}`,
         expires_in: 30,
         interval: 0.01,
       }))
     }
     if (request.url === '/api/open-api/device/token') {
+      deviceTokenRequests += 1
+      if (deviceTokenRequests === 1) {
+        response.statusCode = 400
+        return response.end(JSON.stringify({ error: 'authorization_pending' }))
+      }
       return response.end(JSON.stringify({ token_type: 'Bearer', api_key: 'pcc_live_authorized', key_id: 'ak-authorized', key_prefix: 'pcc_live_authoriz' }))
     }
     if (request.url === '/files/image.png') {
@@ -192,11 +205,15 @@ test('device authorization saves credentials and uses them automatically', async
     PICCC_API_BASE_URL: baseUrl,
     PICCC_AUTH_BASE_URL: baseUrl,
     PICCC_CREDENTIALS_FILE: credentialsFile,
+    PICCC_NO_BROWSER: '1',
   }
   try {
     const login = await runRaw(['auth', 'login', '--client-name', 'Codex test', '--timeout', '5000'], env)
     assert.equal(login.code, 0)
+    assert.equal(deviceTokenRequests, 2)
     assert.match(login.stderr, /authorize\/device\?user_code=ABCD-EFGH-JKLM/)
+    const authorizationRequest = requests.findLast((item) => item.url === '/api/open-api/device/authorization')
+    assert.match(authorizationRequest.body.redirect_uri, /^http:\/\/127\.0\.0\.1:\d+\/piccc-ai\/authorized\?state=/)
     assert.doesNotMatch(`${login.stdout}${login.stderr}`, /pcc_live_authorized/)
     const loginResult = JSON.parse(login.stdout)
     assert.equal(loginResult.authenticated, true)
@@ -215,6 +232,23 @@ test('device authorization saves credentials and uses them automatically', async
     const logout = await runRaw(['auth', 'logout'], env)
     assert.equal(JSON.parse(logout.stdout).authenticated, false)
     await assert.rejects(readFile(credentialsFile, 'utf8'), { code: 'ENOENT' })
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('manual authorization remains available without a browser callback', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'piccc-skills-auth-manual-'))
+  try {
+    const result = await runRaw(['auth', 'login', '--no-browser', '--timeout', '5000'], {
+      PICCC_API_KEY: '',
+      PICCC_AUTH_BASE_URL: baseUrl,
+      PICCC_CREDENTIALS_FILE: join(directory, 'credentials.json'),
+    })
+    assert.equal(result.code, 0)
+    const authorizationRequest = requests.findLast((item) => item.url === '/api/open-api/device/authorization')
+    assert.equal(authorizationRequest.body.redirect_uri, undefined)
+    assert.doesNotMatch(result.stderr, /redirect_uri=/)
   } finally {
     await rm(directory, { recursive: true, force: true })
   }

@@ -28,7 +28,9 @@ npx skills add xiaoyaocz/piccc-ai-skills
 连接我的皮可AI账号
 ```
 
-Agent 会生成一个授权链接。打开链接，登录皮可AI并确认授权即可；API Key 会自动创建并保存在本机，不需要复制密钥或配置环境变量。
+Agent 会自动打开授权页面。登录皮可AI并确认授权后，页面会跳转到本地完成连接，Agent 会自动继续；API Key 会创建并保存在本机，不需要复制密钥、配置环境变量或再告诉 Agent“已经完成”。
+
+如果浏览器无法自动打开，命令仍会显示授权链接和验证码，手动打开链接即可。也可以使用 `node scripts/piccc.mjs auth login --no-browser` 明确启用原来的手动授权方式。
 
 ## 使用
 

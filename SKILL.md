@@ -9,7 +9,7 @@ Use `{baseDir}/scripts/piccc.mjs` for every Piccc AI request. `{baseDir}` is the
 
 ## Before the first request
 
-Run `node {baseDir}/scripts/piccc.mjs auth status`. If it reports `authenticated: false`, run `node {baseDir}/scripts/piccc.mjs auth login`, give the user the displayed authorization link and verification code, and wait for the command to finish. Never ask the user to create, copy, or paste an API Key.
+Run `node {baseDir}/scripts/piccc.mjs auth status`. If it reports `authenticated: false`, run `node {baseDir}/scripts/piccc.mjs auth login` and wait for the command to finish. The command opens the authorization page, receives the local browser callback, and saves the API Key automatically. Do not ask the user to report that authorization is complete. If the browser cannot be opened, give the user the displayed link and code while the command continues waiting. Never ask the user to create, copy, or paste an API Key.
 
 ## Workflow
 
@@ -39,6 +39,7 @@ node {baseDir}/scripts/piccc.mjs task get TASK_ID
 node {baseDir}/scripts/piccc.mjs task wait TASK_ID --output-dir OUTPUT_DIR
 node {baseDir}/scripts/piccc.mjs tasks --type image --status completed --page 1 --page-size 20
 node {baseDir}/scripts/piccc.mjs auth login
+node {baseDir}/scripts/piccc.mjs auth login --no-browser
 node {baseDir}/scripts/piccc.mjs auth status
 node {baseDir}/scripts/piccc.mjs auth logout
 node {baseDir}/scripts/piccc.mjs --help
